@@ -126,7 +126,10 @@ senza errori.
    ```
 6. Nel browser (si apre da solo su `http://localhost:8501`):
    - Scegli la modalità in alto ("Solo Bar Path" o "VBT Avanzato").
-   - Se scegli VBT, imposta nella sidebar peso, diametro disco ed esercizio.
+   - Scegli la modalità in alto. Se scegli VBT, subito sotto l'app ti chiede
+     esercizio, peso sul bilanciere e diametro del disco (nel flusso
+     principale della pagina, non nella sidebar: così non li perdi di vista
+     sul telefono, dove la sidebar parte chiusa).
    - Carica il video, clicca sul bilanciere nel primo fotogramma (in modalità
      VBT, fai combaciare l'area selezionata con l'altezza del disco), poi
      premi **"Elabora Video"**.

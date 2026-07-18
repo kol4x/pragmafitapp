@@ -311,12 +311,25 @@ CUSTOM_CSS = """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 
-def step_header(index: str, label: str, sub: str = ""):
-    """Eyebrow tipografico per una sezione del flusso (sostituisce st.subheader)."""
+_STEP_COUNTER = {"n": 0}
+
+
+def step_header(label: str, sub: str = "", index: str = None):
+    """Eyebrow tipografico per una sezione del flusso (sostituisce st.subheader).
+
+    Senza 'index' esplicito, il numero di step si auto-incrementa: questo
+    tiene la numerazione sempre corretta anche quando uno step (es. i
+    parametri VBT) compare solo in una delle due modalità.
+    """
+    if index is None:
+        idx_str = f"{_STEP_COUNTER['n']:02d}"
+        _STEP_COUNTER["n"] += 1
+    else:
+        idx_str = index
     sub_html = f'<span class="sub">{sub}</span>' if sub else ""
     st.markdown(
         f'<div class="pragma-step">'
-        f'<span class="idx">{index}</span>'
+        f'<span class="idx">{idx_str}</span>'
         f'<span class="label">{label}</span>'
         f'{sub_html}'
         f'</div>',
@@ -373,13 +386,16 @@ with st.expander("Come funziona", expanded=False):
     st.markdown(
         """
         1. Scegli la modalità qui sotto.
-        2. **Carica** un video (bilanciere già visibile nel primo fotogramma).
-        3. **Clicca** su un punto ad alto contrasto del bilanciere (bordo di
+        2. **Se sei in modalità VBT**, indica esercizio, peso sul bilanciere
+           e diametro del disco: servono per calcolare velocità, potenza e
+           1RM stimato.
+        3. **Carica** un video (bilanciere già visibile nel primo fotogramma).
+        4. **Clicca** su un punto ad alto contrasto del bilanciere (bordo di
            un disco, adesivo, anello) e regola l'area da seguire — in
            modalità VBT quest'area viene usata anche per calibrare la
            conversione pixel → metri, quindi conviene farla combaciare con
            l'altezza del disco.
-        4. Premi **Analizza set**. Il tracciamento (CSRT) segue il punto in
+        5. Premi **Analizza set**. Il tracciamento (CSRT) segue il punto in
            ogni fotogramma; in modalità VBT ottieni anche velocità, potenza,
            ripetizioni, 1RM stimato e un feedback sulla fatica.
 
@@ -393,7 +409,7 @@ with st.expander("Come funziona", expanded=False):
 # ----------------------------------------------------------------------------
 # 0) SELEZIONE MODALITÀ
 # ----------------------------------------------------------------------------
-step_header("00", "Modalità")
+step_header("Modalità")
 mode = st.radio(
     "Modalità",
     ["Solo Bar Path (Analisi visiva)", "VBT Avanzato (Algoritmo di Allenamento)"],
@@ -403,32 +419,52 @@ mode = st.radio(
 vbt_mode = mode.startswith("VBT")
 
 # ----------------------------------------------------------------------------
-# SIDEBAR - parametri
+# 1) PARAMETRI DELLA SERIE (solo modalità VBT)
+#
+# Questi tre valori sono chiesti qui, nel flusso principale della pagina, e
+# non in sidebar: sul telefono la sidebar parte chiusa e passa facilmente
+# inosservata, mentre peso, esercizio e diametro sono indispensabili per
+# calcolare velocità/potenza/1RM, quindi l'app li chiede esplicitamente
+# prima di procedere.
 # ----------------------------------------------------------------------------
-with st.sidebar:
-    st.markdown(
-        '<div class="pragma-step" style="margin-top:0;">'
-        '<span class="idx">//</span><span class="label">Impostazioni</span>'
-        '</div>',
-        unsafe_allow_html=True,
+exercise = None
+peso_kg = None
+diametro_cm = None
+
+if vbt_mode:
+    step_header("Parametri della serie")
+    st.caption("Servono per calibrare pixel → metri e calcolare velocità, potenza e 1RM stimato.")
+
+    exercise = st.radio(
+        "Esercizio",
+        list(EXERCISE_PROFILES.keys()),
+        horizontal=True,
     )
 
-    micro_header("Aspetto traiettoria")
-    line_color_hex = st.color_picker("Colore linea", "#FF4433")
-    line_thickness = st.slider("Spessore linea", min_value=2, max_value=12, value=4)
-
-    exercise = None
-    peso_kg = None
-    diametro_cm = None
-
-    if vbt_mode:
-        micro_header("Parametri VBT")
-        peso_kg = st.number_input("Peso sul bilanciere (kg)", min_value=1.0, value=20.0, step=1.0)
+    col_a, col_b = st.columns(2)
+    with col_a:
+        peso_kg = st.number_input(
+            "Peso sul bilanciere (kg)", min_value=1.0, value=20.0, step=1.0,
+            help="Il carico totale sul bilanciere per questa serie (bilanciere + dischi).",
+        )
+    with col_b:
         diametro_cm = st.number_input(
             "Diametro del disco (cm)", min_value=5.0, value=45.0, step=0.5,
             help="45 cm è lo standard olimpico. Usato per convertire i pixel in metri.",
         )
-        exercise = st.selectbox("Tipo di esercizio", list(EXERCISE_PROFILES.keys()))
+
+# ----------------------------------------------------------------------------
+# SIDEBAR - solo aspetto grafico (non blocca il flusso su mobile)
+# ----------------------------------------------------------------------------
+with st.sidebar:
+    st.markdown(
+        '<div class="pragma-step" style="margin-top:0;">'
+        '<span class="idx">//</span><span class="label">Aspetto</span>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    line_color_hex = st.color_picker("Colore linea", "#FF4433")
+    line_thickness = st.slider("Spessore linea", min_value=2, max_value=12, value=4)
 
     st.markdown(
         '<div class="pragma-footer" style="text-align:left; margin-top:2rem;">PRAGMA FIT · Streamlit · OpenCV</div>',
@@ -685,7 +721,7 @@ def velocity_loss_feedback(vl_pct):
 # ----------------------------------------------------------------------------
 # 1) UPLOAD VIDEO
 # ----------------------------------------------------------------------------
-step_header("01", "Carica il video")
+step_header("Carica il video")
 uploaded_file = st.file_uploader(
     "Trascina qui il tuo video o caricalo dal rullino",
     type=["mp4", "mov", "avi", "mkv", "m4v"],
@@ -718,7 +754,7 @@ if first_frame is None:
 # ----------------------------------------------------------------------------
 # 2) SELEZIONE DEL PUNTO DI PARTENZA SUL PRIMO FOTOGRAMMA
 # ----------------------------------------------------------------------------
-step_header("02", "Clicca sul bilanciere")
+step_header("Clicca sul bilanciere")
 if vbt_mode:
     st.caption(
         "In modalità VBT, l'area selezionata viene usata anche per "
@@ -776,7 +812,7 @@ else:
 # ----------------------------------------------------------------------------
 # 3) ELABORAZIONE
 # ----------------------------------------------------------------------------
-step_header("03", "Analizza set")
+step_header("Analizza set")
 process_clicked = st.button(
     "Analizza set",
     use_container_width=True,
@@ -916,7 +952,7 @@ if process_clicked and selected_point is not None:
             f"un'area leggermente più grande."
         )
 
-    step_header("→", "Risultato")
+    step_header("Risultato", index="→")
     st.video(output_path)
 
     with open(output_path, "rb") as f:
@@ -936,7 +972,7 @@ if process_clicked and selected_point is not None:
     if vbt_mode:
         metrics = compute_vbt_metrics(raw_series, fps, mpp, peso_kg)
 
-        step_header("→", "Dashboard VBT")
+        step_header("Dashboard VBT", index="→")
 
         if metrics is None or metrics["reps_count"] == 0:
             st.warning(
