@@ -65,9 +65,44 @@ hai fornito (`assets/pragma_logo.png`):
 5. **Potenza**: Potenza = Forza × Velocità, con Forza = massa × (9.81 +
    accelerazione istantanea del bilanciere).
 6. **1RM stimato di oggi**: usa la velocità media della ripetizione più
-   veloce della serie e il profilo carico-velocità dell'esercizio scelto.
+   veloce della serie e il profilo carico-velocità dell'esercizio scelto —
+   affiancata da una seconda stima classica (formula di Epley, da peso e
+   numero di ripetizioni) come riferimento incrociato. Vedi la sezione
+   dedicata più sotto.
 7. **Feedback su Velocity Loss**: confronta la velocità media della prima e
    dell'ultima ripetizione della serie e restituisce un consiglio pratico.
+
+### 🐞 Bug corretto: 1RM assurdo su serie lunghe (es. "100kg×8 → 500kg")
+Nella versione precedente, una serie di più ripetizioni (es. 8 reps) poteva
+produrre una stima 1RM completamente irrealistica (es. 500kg da un carico di
+100kg). Causa: il modello carico-velocità è calibrato per **serie brevi (1-3
+ripetizioni) a velocità massima intenzionale con un carico impegnativo** —
+esattamente come funzionano i dispositivi VBT commerciali. Su una serie più
+lunga o sub-massimale, anche il colpo "più veloce" della serie può avere una
+velocità che il modello interpreta come "carico leggerissimo", gonfiando la
+stima. Un margine di sicurezza troppo permissivo (20% come soglia minima)
+lasciava passare questi casi estremi.
+
+**Correzioni applicate:**
+- Il margine minimo di sicurezza è salito dal 20% al 30% del %1RM.
+- Quando la serie ha più di 3 ripetizioni (o quando il modello finisce comunque
+  fuori dal proprio range valido), l'app **non sostituisce silenziosamente**
+  il numero: mostra entrambe le stime — quella da velocità e quella classica
+  da ripetizioni (Epley) — con un avviso esplicito su quale delle due fidarsi
+  in quel caso, e un suggerimento su come ottenere una lettura VBT precisa
+  (serie da 1-3 ripetizioni a massima velocità).
+- Rafforzata anche la robustezza del calcolo: uno smoothing leggero in più
+  sulla serie di velocità (oltre a quello sulla posizione) e un filtro sul
+  numero minimo di fotogrammi per considerare valida una ripetizione, per
+  evitare che 2-3 fotogrammi rumorosi vengano letti come un colpo con
+  velocità istantanea assurda.
+
+Testato end-to-end (upload → tracciamento → dashboard) con una serie
+sintetica da 8 ripetizioni: la stima da ripetizioni resta nell'ordine di
+grandezza atteso (~127kg per 100kg×8), mentre quella da velocità viene
+correttamente segnalata come non affidabile per una serie di quella
+lunghezza, indipendentemente da eventuali rumore/imprecisioni di
+tracciamento a monte.
 
 ### ⚠️ Un'avvertenza importante sui profili carico-velocità
 Solo il profilo della **Panca Piana** (`%1RM = 121.1 - 74.7·v`) corrisponde a

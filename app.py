@@ -369,7 +369,11 @@ GRAVITY = 9.81  # m/s^2
 # ripetizioni e per isolare i campioni "concentrici" (fase di salita).
 V_THRESHOLD = 0.03          # m/s: sotto questa soglia il movimento e' considerato rumore
 MIN_REP_DISPLACEMENT_M = 0.05  # una "salita" deve spostare almeno 5 cm per contare come rep
-SMOOTH_WINDOW = 5           # finestra di media mobile sulla posizione, solo per i calcoli fisici
+MIN_REP_SAMPLES = 4         # una "salita" deve durare almeno N campioni per contare come rep
+                             # (evita che 2-3 fotogrammi rumorosi vengano letti come una rep
+                             # con velocita' istantanea assurda)
+SMOOTH_WINDOW = 7           # finestra di media mobile sulla posizione, solo per i calcoli fisici
+VELOCITY_SMOOTH_WINDOW = 3  # ulteriore, leggero smoothing sulla serie di velocita' stessa
 
 # Profili carico-velocita' per la stima dell'1RM: %1RM = a - b * v_media_rep_piu_veloce
 # ATTENZIONE: solo il profilo "Panca Piana" corrisponde a un modello diffuso in
@@ -381,6 +385,26 @@ EXERCISE_PROFILES = {
     "Squat": {"a": 116.0, "b": 63.5},          # indicativo
     "Stacco da terra": {"a": 110.0, "b": 72.0},  # indicativo
 }
+
+# --- Affidabilita' della stima 1RM da velocita' -----------------------------
+# Il modello carico-velocita' (%1RM = a - b*v) e' calibrato per SERIE BREVI
+# (1-3 ripetizioni) eseguite alla massima velocita' intenzionale con un carico
+# davvero impegnativo. Fuori da queste condizioni la stima puo' diventare
+# assurda: un colpo "veloce" dentro una serie lunga o sub-massimale (es. 100kg
+# per 8 ripetizioni) puo' avere una velocita' che il modello legge come "carico
+# leggerissimo", producendo un 1RM gonfiato (es. 500kg da un colpo a 100kg).
+#
+# Soluzione applicata (due livelli di protezione):
+# 1. Il pavimento del clamp su %1RM e' alzato al 30% (prima era 20%): sotto
+#    questa soglia il modello e' considerato fuori dal proprio range valido.
+# 2. Quando la serie ha piu' di REPS_MAX_FOR_RELIABLE_VBT ripetizioni, oppure
+#    quando il %1RM non-clampato cade sotto la soglia, la stima da velocita'
+#    viene affiancata (non sostituita silenziosamente) da una stima classica
+#    basata sul numero di ripetizioni (formula di Epley), con un avviso
+#    esplicito su quale numero fidarsi di piu' e perche'.
+PCT_1RM_FLOOR = 30.0
+REPS_MAX_FOR_RELIABLE_VBT = 3
+
 
 with st.expander("Come funziona", expanded=False):
     st.markdown(
@@ -398,6 +422,13 @@ with st.expander("Come funziona", expanded=False):
         5. Premi **Analizza set**. Il tracciamento (CSRT) segue il punto in
            ogni fotogramma; in modalità VBT ottieni anche velocità, potenza,
            ripetizioni, 1RM stimato e un feedback sulla fatica.
+
+        💡 **Per una stima 1RM precisa**: la stima basata sulla velocità è
+        pensata per serie brevi (1-3 ripetizioni) eseguite alla massima
+        velocità possibile con un carico impegnativo — è così che funzionano
+        tutti i dispositivi VBT commerciali. Su serie più lunghe o
+        sub-massimali, l'app affianca automaticamente una stima classica
+        basata sul numero di ripetizioni, più affidabile in quel caso.
 
         *Le stime VBT si basano su un tracciamento video 2D con una
         telecamera non calibrata: sono utili per il trend e per un feedback
@@ -595,6 +626,14 @@ def compute_vbt_metrics(raw_series, fps, mpp, weight_kg):
         v = dy_m / dt
         velocities.append(v)
 
+    # Smoothing leggero anche sulla velocita' stessa: lo smoothing sulla sola
+    # posizione non basta a eliminare gli "spike" della derivata quando il
+    # tracciamento oscilla di 1-2 pixel tra due fotogrammi consecutivi. Senza
+    # questo passaggio, un singolo colpo rumoroso puo' risultare con una
+    # velocita' istantanea assurda e falsare la stima dell'1RM (era la causa
+    # principale del bug "500kg da un colpo a 100kg").
+    velocities = smooth_series(velocities, VELOCITY_SMOOTH_WINDOW)
+
     # --- Accelerazione e potenza istantanea ---
     # Forza = m * (g + a); Potenza = Forza * velocita'
     accelerations = [0.0]
@@ -649,8 +688,14 @@ def compute_vbt_metrics(raw_series, fps, mpp, weight_kg):
                 for k in range(start, end)
                 if k + 1 <= end
             )
-            # Filtra micro-oscillazioni classificate come "salita" per errore
-            if abs(seg_displacement_m) >= MIN_REP_DISPLACEMENT_M and seg_velocities:
+            # Filtra micro-oscillazioni classificate come "salita" per errore:
+            # sia per spostamento minimo, sia per durata minima (un segmento
+            # troppo corto, anche se supera i 5cm, e' spesso solo rumore di
+            # tracciamento con velocita' istantanea non realistica).
+            if (
+                abs(seg_displacement_m) >= MIN_REP_DISPLACEMENT_M
+                and len(seg_velocities) >= MIN_REP_SAMPLES
+            ):
                 reps.append({
                     "start_idx": start,
                     "end_idx": end,
@@ -683,14 +728,38 @@ def compute_vbt_metrics(raw_series, fps, mpp, weight_kg):
     }
 
 
-def estimate_1rm(exercise_name, fastest_rep_velocity, weight_kg):
-    """Stima l'1RM del giorno dal profilo carico-velocita' dell'esercizio."""
+def estimate_1rm_velocity(exercise_name, fastest_rep_velocity, weight_kg):
+    """
+    Stima l'1RM dal profilo carico-velocita' dell'esercizio, usando la
+    velocita' media della SINGOLA ripetizione piu' veloce della serie (mai
+    una media su tutte le ripetizioni: mediare i colpi di una serie lunga
+    con quelli di una serie esplosiva breve produrrebbe una velocita' non
+    rappresentativa di nessuno dei due scenari).
+
+    Ritorna (1RM stimato, %1RM usato, affidabile:bool). 'affidabile' e' False
+    quando il %1RM non-clampato cade sotto PCT_1RM_FLOOR: significa che la
+    velocita' misurata e' fuori dal range su cui il modello lineare ha senso
+    (tipicamente perche' il colpo piu' veloce viene da una serie lunga o
+    sub-massimale, non da un vero tentativo a carico impegnativo).
+    """
     profile = EXERCISE_PROFILES[exercise_name]
-    pct_1rm = profile["a"] - profile["b"] * fastest_rep_velocity
-    # Clamp di sicurezza: sotto ~20% o sopra 100% la stima non ha senso pratico
-    pct_1rm_clamped = max(20.0, min(100.0, pct_1rm))
+    pct_1rm_raw = profile["a"] - profile["b"] * fastest_rep_velocity
+    affidabile = pct_1rm_raw >= PCT_1RM_FLOOR
+    pct_1rm_clamped = max(PCT_1RM_FLOOR, min(100.0, pct_1rm_raw))
     estimated_1rm = weight_kg / (pct_1rm_clamped / 100.0)
-    return estimated_1rm, pct_1rm_clamped
+    return estimated_1rm, pct_1rm_clamped, affidabile
+
+
+def estimate_1rm_from_reps(weight_kg, reps_count):
+    """
+    Stima di riserva basata sul numero di ripetizioni (formula di Epley),
+    utile come riferimento incrociato quando la serie non e' adatta alla
+    stima da velocita' (troppo lunga per essere stata un tentativo massimale
+    a velocita' intenzionale). Presuppone la serie svolta vicino al cedimento:
+    e' anch'essa una stima, non un dato certo.
+    """
+    reps_count = max(1, reps_count)
+    return weight_kg * (1 + reps_count / 30.0)
 
 
 def velocity_loss_feedback(vl_pct):
@@ -989,22 +1058,59 @@ if process_clicked and selected_point is not None:
             col3.metric("Potenza di picco", f"{metrics['peak_power']:.0f} W")
             col4.metric("Ripetizioni rilevate", f"{metrics['reps_count']}")
 
-            # --- Stima 1RM di oggi ---
+            # --- Stima 1RM di oggi (doppio metodo, vedi costanti VBT sopra) ---
             fastest_rep = max(metrics["reps"], key=lambda r: r["mean_v"])
-            estimated_1rm, pct_used = estimate_1rm(exercise, fastest_rep["mean_v"], peso_kg)
+            vbt_1rm, pct_used, vbt_affidabile = estimate_1rm_velocity(
+                exercise, fastest_rep["mean_v"], peso_kg
+            )
+            reps_1rm = estimate_1rm_from_reps(peso_kg, metrics["reps_count"])
+
+            # La stima da velocita' e' affidabile solo se il modello non e'
+            # stato "clampato" FUORI dal suo range valido E la serie e'
+            # abbastanza breve da poter essere un vero tentativo massimale.
+            serie_adatta_a_vbt = metrics["reps_count"] <= REPS_MAX_FOR_RELIABLE_VBT
+            stima_affidabile = vbt_affidabile and serie_adatta_a_vbt
 
             micro_header(f"1RM stimato oggi <span>· {exercise}</span>")
-            st.metric(
-                " ",
-                f"{estimated_1rm:.1f} kg",
-                label_visibility="collapsed",
-                help=f"Stimato dalla ripetizione più veloce ({fastest_rep['mean_v']:.2f} m/s), "
+
+            col_v, col_r = st.columns(2)
+            col_v.metric(
+                "Da velocità (VBT)",
+                f"{vbt_1rm:.1f} kg",
+                help=f"Dalla ripetizione più veloce della serie ({fastest_rep['mean_v']:.2f} m/s), "
                      f"corrispondente a circa il {pct_used:.0f}% dell'1RM secondo il profilo "
                      f"carico-velocità di {exercise}.",
             )
+            col_r.metric(
+                "Da ripetizioni (rif.)",
+                f"{reps_1rm:.1f} kg",
+                help="Stima classica (formula di Epley) da peso e numero di ripetizioni, "
+                     "assumendo la serie svolta vicino al cedimento. Utile come riferimento "
+                     "incrociato, specialmente su serie lunghe.",
+            )
+
+            if stima_affidabile:
+                st.caption(
+                    "Serie breve a velocità elevata: la stima **da velocità** è quella "
+                    "più affidabile in questo caso."
+                )
+            else:
+                motivo = (
+                    f"la serie ha {metrics['reps_count']} ripetizioni (il modello VBT è "
+                    f"pensato per serie di massimo {REPS_MAX_FOR_RELIABLE_VBT})"
+                    if not serie_adatta_a_vbt
+                    else "la ripetizione più veloce ha una velocità fuori dal range tipico del modello"
+                )
+                st.warning(
+                    f"⚠️ La stima **da velocità** qui sopra non è affidabile: {motivo}. "
+                    f"In questo caso conviene fare riferimento alla stima **da ripetizioni** "
+                    f"({reps_1rm:.1f} kg). Per una stima da velocità precisa, esegui una serie "
+                    f"breve (1-3 ripetizioni) alla massima velocità possibile con un carico "
+                    f"impegnativo."
+                )
             st.caption(
-                "Stima indicativa basata su un profilo carico-velocità generico, "
-                "non un dato clinico validato individualmente."
+                "Entrambe le stime sono indicative: non sostituiscono un test 1RM reale "
+                "né un dato clinico validato individualmente."
             )
 
             # --- Feedback su Velocity Loss ---
