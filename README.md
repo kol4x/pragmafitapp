@@ -104,6 +104,87 @@ correttamente segnalata come non affidabile per una serie di quella
 lunghezza, indipendentemente da eventuali rumore/imprecisioni di
 tracciamento a monte.
 
+### 🐞 Bug corretto: un solo colpo "anomalo" poteva dettare l'1RM da solo
+Anche dopo il fix precedente, restava un problema più sottile: la velocità
+di ogni ripetizione **è già calcolata solo sulla fase concentrica** (i
+fotogrammi classificati "in salita" — la fase eccentrica, la discesa
+controllata, non entra mai nel calcolo). Il bug reale era un altro: la fase
+eccentrica è lenta e controllata, quindi ha un rapporto segnale/rumore
+peggiore della concentrica esplosiva — basta un piccolo errore di
+tracciamento durante la discesa perché la velocità istantanea superi per
+qualche fotogramma la soglia di "movimento", venendo scambiata per un breve
+tratto in salita. Se questo tratto anomalo risultava — per puro rumore — più
+"veloce" di tutte le ripetizioni vere, veniva scelto come "ripetizione più
+veloce" per il calcolo dell'1RM, falsando tutto.
+
+**Correzioni applicate:**
+- Soglia di rumore (`V_THRESHOLD`) alzata e resa più severa: un tratto deve
+  avere un picco di velocità chiaramente sopra la soglia (non solo "appena
+  sopra" per un fotogramma) per essere considerato un vero movimento.
+- Durata minima di una ripetizione ora proporzionata agli fps del video
+  (prima era un numero fisso di fotogrammi, impreciso su video girati a
+  frame rate diversi).
+- **Filtro anti-outlier**: tra tutte le ripetizioni rilevate, quelle con una
+  velocità media superiore a 2,2 volte la mediana della serie vengono
+  escluse dal calcolo dell'1RM e della perdita di velocità (ma restano
+  conteggiate nel numero di ripetizioni). Una serie vera di ripetizioni
+  pesanti ha velocità simili tra loro: un singolo colpo molto più
+  "esplosivo" di tutti gli altri è quasi sempre un artefatto di
+  tracciamento, non un vero exploit dell'atleta. Se l'app esclude una
+  ripetizione per questo motivo, te lo segnala esplicitamente sotto la
+  dashboard.
+- Anche "Velocità di picco" e "Potenza di picco" nella dashboard ora
+  derivano solo dalle ripetizioni valide/non-outlier, per coerenza in tutta
+  la scheda.
+
+Verificato con un test dedicato: inserendo artificialmente un colpo spurio a
+2,1 m/s in mezzo a tre ripetizioni reali coerenti (~0,65-0,77 m/s), il
+filtro lo esclude correttamente e la stima 1RM passa da 333kg (calcolo
+"ingenuo", senza filtro) a 183kg (usando la vera ripetizione più veloce).
+
+### 🐞 Bug corretto: velocità "schiacciata" → 1RM = peso sollevato
+Un altro caso reale: panca piana, 65kg, 3 ripetizioni, velocità media
+rilevata sulla rep più veloce di soli 0,16 m/s (velocità di picco 0,34 m/s).
+L'app restituiva un 1RM stimato di **65kg esatti** — cioè "il tuo massimale è
+esattamente il peso che hai appena sollevato per 3 ripetizioni", il che è
+fisicamente impossibile: se fai 3 rep non sei al 100% del massimale sulla
+prima.
+
+**Due cause distinte, corrette entrambe:**
+
+1. **La media veniva "tirata giù" da fotogrammi quasi fermi a inizio/fine
+   ripetizione.** Il meccanismo che evita di spezzare una rep per un
+   fotogramma rumoroso (debounce) ha un effetto collaterale: include nel
+   segmento anche qualche fotogramma di stacco iniziale e di lockout finale,
+   quasi fermi. Includerli nella *media* la fa crollare, anche se a metà
+   salita la spinta è stata forte (lo confermava la velocità di picco, molto
+   più alta). Ora questi fotogrammi vengono rifilati **solo dal calcolo della
+   media** (non dal resto della logica) prima di calcolare la velocità media
+   di ogni ripetizione.
+2. **Non esisteva un controllo "soffitto".** Il fix precedente controllava
+   solo se il %1RM calcolato fosse troppo *basso* (velocità troppo alta per
+   il modello). Ma non controllava mai se fosse implausibilmente *alto*
+   (velocità troppo bassa per il numero di ripetizioni realmente svolte) — e
+   quel caso specifico ci cadeva dentro in pieno (%1RM grezzo: 109%, cioè
+   "oltre il massimale", pur avendo fatto 3 rep). Ora l'app calcola anche il
+   %1RM atteso in base al numero di ripetizioni svolte (stessa logica della
+   formula di Epley) e, se il valore misurato lo supera troppo, segnala la
+   stima da velocità come non affidabile e rimanda a quella da ripetizioni.
+
+Non ho invece integrato la formula "a velocità di picco" proposta in un
+suggerimento ricevuto (`%1RM = 117.8 - 45.9·v_picco`): non sono riuscito a
+verificarla come uno standard scientifico effettivamente validato, e non
+volevo inserire nel codice un numero dall'aria autorevole ma non verificato.
+La velocità di picco resta comunque visibile nella dashboard come dato di
+per sé utile.
+
+**Anche qui, un limite reale che nessun fix software può eliminare del
+tutto**: se il telefono non è ben perpendicolare al piano di movimento del
+bilanciere, la distorsione prospettica riduce i pixel percorsi dal
+bilanciere rispetto al reale, abbassando la velocità calcolata. L'app ora lo
+ricorda esplicitamente nello step dei parametri VBT, ma la soluzione vera
+resta una buona inquadratura in fase di ripresa.
+
 ### ⚠️ Un'avvertenza importante sui profili carico-velocità
 Solo il profilo della **Panca Piana** (`%1RM = 121.1 - 74.7·v`) corrisponde a
 un modello diffuso in letteratura VBT. Per **Squat** e **Stacco da terra** non

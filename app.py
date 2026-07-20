@@ -367,11 +367,27 @@ GRAVITY = 9.81  # m/s^2
 
 # Soglie per la classificazione di fase (su/giu'/fermo) usate per il conteggio
 # ripetizioni e per isolare i campioni "concentrici" (fase di salita).
-V_THRESHOLD = 0.03          # m/s: sotto questa soglia il movimento e' considerato rumore
+V_THRESHOLD = 0.05          # m/s: sotto questa soglia il movimento e' considerato rumore
+                             # (alzata da 0.03: la fase eccentrica controllata e' lenta, quindi
+                             # con una soglia troppo bassa il rumore di tracciamento durante la
+                             # discesa puo' superarla e passare per un breve tratto "in salita")
 MIN_REP_DISPLACEMENT_M = 0.05  # una "salita" deve spostare almeno 5 cm per contare come rep
-MIN_REP_SAMPLES = 4         # una "salita" deve durare almeno N campioni per contare come rep
-                             # (evita che 2-3 fotogrammi rumorosi vengano letti come una rep
-                             # con velocita' istantanea assurda)
+MIN_REP_DURATION_S = 0.15   # durata minima di una "salita" per contare come rep (non un numero
+                             # fisso di fotogrammi: cosi' funziona correttamente sia a 24 che a
+                             # 60 fps)
+PEAK_TO_THRESHOLD_MIN_RATIO = 2.0  # il picco di velocita' del tratto deve superare chiaramente
+                                    # la soglia di rumore (non bastare per un pelo) per essere
+                                    # considerato un vero movimento esplosivo
+REP_OUTLIER_MULTIPLIER = 2.2       # una "rep" con velocita' media oltre 2.2x la mediana delle
+                                    # altre rep della stessa serie e' quasi certamente un
+                                    # artefatto di tracciamento, non un colpo davvero piu' veloce
+                                    # (era la causa piu' probabile del bug "500kg da 100kg")
+TRIM_VELOCITY_FRACTION = 0.20      # rifila dalla media (non dal segmento) i fotogrammi di testa/coda
+                                    # sotto il 20% del picco della rep: sono lo stacco iniziale e il
+                                    # lockout finale, quasi fermi, che il debounce include nel
+                                    # segmento ma che farebbero crollare la media senza motivo
+MIN_REP_SAMPLES_AFTER_TRIM = 3     # se il trim lascia meno campioni di cosi', si tiene il segmento
+                                    # originale non tagliato (evita medie su 1-2 valori isolati)
 SMOOTH_WINDOW = 7           # finestra di media mobile sulla posizione, solo per i calcoli fisici
 VELOCITY_SMOOTH_WINDOW = 3  # ulteriore, leggero smoothing sulla serie di velocita' stessa
 
@@ -390,19 +406,31 @@ EXERCISE_PROFILES = {
 # Il modello carico-velocita' (%1RM = a - b*v) e' calibrato per SERIE BREVI
 # (1-3 ripetizioni) eseguite alla massima velocita' intenzionale con un carico
 # davvero impegnativo. Fuori da queste condizioni la stima puo' diventare
-# assurda: un colpo "veloce" dentro una serie lunga o sub-massimale (es. 100kg
-# per 8 ripetizioni) puo' avere una velocita' che il modello legge come "carico
-# leggerissimo", producendo un 1RM gonfiato (es. 500kg da un colpo a 100kg).
+# assurda in DUE direzioni opposte:
+# - troppo ALTA: un colpo "veloce" dentro una serie lunga o sub-massimale (es.
+#   100kg per 8 ripetizioni) puo' avere una velocita' che il modello legge
+#   come "carico leggerissimo" (es. 500kg da un colpo a 100kg).
+# - troppo BASSA: fotogrammi quasi fermi a inizio/fine rep (vedi TRIM_VELOCITY_
+#   FRACTION sopra) o un'inquadratura non perfettamente parallela al bilanciere
+#   possono far leggere una velocita' piu' bassa del vero, che il modello
+#   scambia per "sei al 100% del massimale" anche se hai fatto piu' rep — cosa
+#   fisicamente impossibile (se hai fatto 3 rep, sulla prima non eri al 100%).
 #
-# Soluzione applicata (due livelli di protezione):
-# 1. Il pavimento del clamp su %1RM e' alzato al 30% (prima era 20%): sotto
-#    questa soglia il modello e' considerato fuori dal proprio range valido.
-# 2. Quando la serie ha piu' di REPS_MAX_FOR_RELIABLE_VBT ripetizioni, oppure
-#    quando il %1RM non-clampato cade sotto la soglia, la stima da velocita'
-#    viene affiancata (non sostituita silenziosamente) da una stima classica
-#    basata sul numero di ripetizioni (formula di Epley), con un avviso
-#    esplicito su quale numero fidarsi di piu' e perche'.
+# Soluzione applicata (protezione simmetrica):
+# 1. Il pavimento del clamp su %1RM e' al 30% (PCT_1RM_FLOOR): sotto questa
+#    soglia il modello e' considerato fuori dal proprio range valido (troppo
+#    ALTA velocita' per essere credibile).
+# 2. Il %1RM grezzo non puo' superare di piu' di PCT_1RM_CEILING_TOLERANCE
+#    punti percentuali quello atteso dal numero di ripetizioni realmente
+#    svolte (troppo BASSA velocita' per essere credibile, vedi
+#    expected_pct_1rm_for_reps).
+# 3. Quando la serie ha piu' di REPS_MAX_FOR_RELIABLE_VBT ripetizioni, oppure
+#    quando uno dei due controlli sopra fallisce, la stima da velocita' viene
+#    affiancata (non sostituita silenziosamente) da una stima classica basata
+#    sul numero di ripetizioni (formula di Epley), con un avviso esplicito su
+#    quale numero fidarsi di piu' e perche'.
 PCT_1RM_FLOOR = 30.0
+PCT_1RM_CEILING_TOLERANCE = 10.0
 REPS_MAX_FOR_RELIABLE_VBT = 3
 
 
@@ -464,7 +492,11 @@ diametro_cm = None
 
 if vbt_mode:
     step_header("Parametri della serie")
-    st.caption("Servono per calibrare pixel → metri e calcolare velocità, potenza e 1RM stimato.")
+    st.caption(
+        "Servono per calibrare pixel → metri e calcolare velocità, potenza e 1RM stimato. "
+        "Per una calibrazione corretta, tieni il telefono ben perpendicolare al piano di "
+        "movimento del bilanciere (non inclinato né troppo di lato)."
+    )
 
     exercise = st.radio(
         "Esercizio",
@@ -673,6 +705,7 @@ def compute_vbt_metrics(raw_series, fps, mpp, weight_kg):
             confirmed_phase.append(current_phase)
 
     # --- Segmentazione delle ripetizioni (ogni tratto continuo "up") ---
+    min_rep_samples = max(4, round(fps * MIN_REP_DURATION_S))
     reps = []
     i = 0
     n = len(confirmed_phase)
@@ -689,24 +722,86 @@ def compute_vbt_metrics(raw_series, fps, mpp, weight_kg):
                 if k + 1 <= end
             )
             # Filtra micro-oscillazioni classificate come "salita" per errore:
-            # sia per spostamento minimo, sia per durata minima (un segmento
-            # troppo corto, anche se supera i 5cm, e' spesso solo rumore di
-            # tracciamento con velocita' istantanea non realistica).
+            # spostamento minimo, durata minima (proporzionata agli fps: 4
+            # fotogrammi a 30fps sono ~130ms, a 60fps sarebbero troppo pochi),
+            # e un picco di velocita' chiaramente sopra la soglia di rumore
+            # (non solo "appena sopra" per un fotogramma isolato).
             if (
                 abs(seg_displacement_m) >= MIN_REP_DISPLACEMENT_M
-                and len(seg_velocities) >= MIN_REP_SAMPLES
+                and len(seg_velocities) >= min_rep_samples
+                and max(seg_velocities) >= V_THRESHOLD * PEAK_TO_THRESHOLD_MIN_RATIO
             ):
+                peak_v_seg = max(seg_velocities)
+                # Il meccanismo di debounce (necessario per non spezzare una
+                # rep per un fotogramma rumoroso) ha un effetto collaterale:
+                # include nel segmento anche qualche fotogramma di "coda"
+                # quasi fermo, subito prima dello stacco e subito dopo il
+                # lockout, prima che il cambio di fase venga confermato.
+                # Includerli nella MEDIA la fa crollare artificialmente,
+                # anche se a meta' salita la spinta e' stata forte (lo si
+                # vede dal peak_v che resta alto). Rifiliamo quei fotogrammi
+                # "quasi fermi" in testa e in coda al segmento SOLO per il
+                # calcolo della media: il picco e i filtri sopra restano
+                # calcolati sul segmento originale, non tagliato.
+                lo, hi = 0, len(seg_velocities) - 1
+                trim_floor = TRIM_VELOCITY_FRACTION * peak_v_seg
+                while lo < hi and seg_velocities[lo] < trim_floor:
+                    lo += 1
+                while hi > lo and seg_velocities[hi] < trim_floor:
+                    hi -= 1
+                trimmed = seg_velocities[lo:hi + 1]
+                # Se il trim lascia troppo pochi campioni (rep molto corta),
+                # meglio tenere il segmento originale piuttosto che rischiare
+                # una media calcolata su 1-2 valori isolati.
+                if len(trimmed) < MIN_REP_SAMPLES_AFTER_TRIM:
+                    trimmed = seg_velocities
+
                 reps.append({
                     "start_idx": start,
                     "end_idx": end,
-                    "mean_v": sum(seg_velocities) / len(seg_velocities),
-                    "peak_v": max(seg_velocities),
+                    "mean_v": sum(trimmed) / len(trimmed),
+                    "peak_v": peak_v_seg,
                 })
         else:
             i += 1
 
+    # --- Rilevamento outlier tra le ripetizioni (protezione per la stima 1RM) ---
+    # Anche dopo i filtri sopra, un singolo tratto puo' restare "falsamente
+    # veloce" per rumore di tracciamento residuo — tipicamente durante la fase
+    # eccentrica (discesa), che essendo lenta e controllata ha un rapporto
+    # segnale/rumore peggiore della concentrica esplosiva. Se scelto come
+    # "ripetizione piu' veloce", questo tipo di artefatto e' la causa piu'
+    # probabile di stime 1RM assurde. Qui marchiamo come outlier ogni rep la
+    # cui velocita' media supera abbondantemente la mediana della serie:
+    # una vera serie di ripetizioni pesanti ha velocita' simili tra loro,
+    # non un colpo isolato molto piu' "esplosivo" degli altri.
+    if len(reps) >= 2:
+        sorted_means = sorted(r["mean_v"] for r in reps)
+        mid = len(sorted_means) // 2
+        median_v = (
+            sorted_means[mid] if len(sorted_means) % 2 == 1
+            else (sorted_means[mid - 1] + sorted_means[mid]) / 2
+        )
+        for r in reps:
+            r["is_outlier"] = median_v > 0 and r["mean_v"] > REP_OUTLIER_MULTIPLIER * median_v
+    else:
+        for r in reps:
+            r["is_outlier"] = False
+
     # --- Metriche aggregate ---
-    concentric_indices = [idx for idx, ph in enumerate(confirmed_phase) if ph == "up"]
+    # Costruite SOLO dai campioni appartenenti a ripetizioni valide e non
+    # outlier (la stessa lista 'reps' usata per l'1RM), non da ogni singolo
+    # fotogramma grezzo classificato "su": cosi' un tratto rumoroso troppo
+    # corto per essere una vera rep (o marcato outlier) non gonfia neppure
+    # "Velocità di picco" o "Potenza di picco" nella dashboard.
+    clean_reps = [r for r in reps if not r["is_outlier"]]
+    reps_for_aggregate = clean_reps if clean_reps else reps
+
+    concentric_indices = [
+        idx
+        for r in reps_for_aggregate
+        for idx in range(r["start_idx"], r["end_idx"] + 1)
+    ]
     concentric_velocities = [velocities[idx] for idx in concentric_indices]
     concentric_power = [
         weight_kg * (GRAVITY + accelerations[idx]) * velocities[idx]
@@ -736,18 +831,37 @@ def estimate_1rm_velocity(exercise_name, fastest_rep_velocity, weight_kg):
     con quelli di una serie esplosiva breve produrrebbe una velocita' non
     rappresentativa di nessuno dei due scenari).
 
-    Ritorna (1RM stimato, %1RM usato, affidabile:bool). 'affidabile' e' False
-    quando il %1RM non-clampato cade sotto PCT_1RM_FLOOR: significa che la
-    velocita' misurata e' fuori dal range su cui il modello lineare ha senso
-    (tipicamente perche' il colpo piu' veloce viene da una serie lunga o
-    sub-massimale, non da un vero tentativo a carico impegnativo).
+    Ritorna (1RM stimato, %1RM usato/clampato, affidabile:bool, %1RM grezzo
+    non-clampato). 'affidabile' e' False quando il %1RM grezzo cade sotto
+    PCT_1RM_FLOOR: significa che la velocita' misurata e' fuori dal range su
+    cui il modello lineare ha senso (tipicamente perche' il colpo piu' veloce
+    viene da una serie lunga o sub-massimale, non da un vero tentativo a
+    carico impegnativo). Il %1RM grezzo viene restituito anche quando supera
+    il 100%, cosi' chi chiama puo' verificare la coerenza con il numero di
+    ripetizioni svolte (vedi expected_pct_1rm_for_reps).
     """
     profile = EXERCISE_PROFILES[exercise_name]
     pct_1rm_raw = profile["a"] - profile["b"] * fastest_rep_velocity
     affidabile = pct_1rm_raw >= PCT_1RM_FLOOR
     pct_1rm_clamped = max(PCT_1RM_FLOOR, min(100.0, pct_1rm_raw))
     estimated_1rm = weight_kg / (pct_1rm_clamped / 100.0)
-    return estimated_1rm, pct_1rm_clamped, affidabile
+    return estimated_1rm, pct_1rm_clamped, affidabile, pct_1rm_raw
+
+
+def expected_pct_1rm_for_reps(reps_count):
+    """
+    %1RM atteso per un certo numero di ripetizioni, dalla stessa relazione
+    che sta dietro alla formula di Epley (100% per 1 rep, via via piu' basso
+    all'aumentare delle rep). Usato come ancora di coerenza: se il %1RM
+    calcolato dalla velocita' risulta molto piu' ALTO di quanto il numero di
+    ripetizioni realmente svolte renda plausibile, la lettura di velocita'
+    e' quasi certamente troppo bassa per un motivo esterno al modello
+    (fotogrammi quasi fermi a inizio/fine rep, inquadratura non perfettamente
+    parallela al bilanciere, ecc.) — fisicamente, se hai fatto 3 ripetizioni
+    non puoi essere stato al 100% del tuo massimale sulla prima.
+    """
+    reps_count = max(1, reps_count)
+    return 100.0 / (1.0 + reps_count / 30.0)
 
 
 def estimate_1rm_from_reps(weight_kg, reps_count):
@@ -1059,25 +1173,53 @@ if process_clicked and selected_point is not None:
             col4.metric("Ripetizioni rilevate", f"{metrics['reps_count']}")
 
             # --- Stima 1RM di oggi (doppio metodo, vedi costanti VBT sopra) ---
-            fastest_rep = max(metrics["reps"], key=lambda r: r["mean_v"])
-            vbt_1rm, pct_used, vbt_affidabile = estimate_1rm_velocity(
+            # La rep "piu' veloce" viene scelta SOLO tra quelle non marcate
+            # come outlier (vedi compute_vbt_metrics): un singolo tratto
+            # anomalo — tipicamente rumore di tracciamento durante la fase
+            # eccentrica, lenta e quindi piu' sensibile al rumore — non deve
+            # poter dettare da solo la stima 1RM.
+            clean_reps = [r for r in metrics["reps"] if not r["is_outlier"]]
+            candidate_reps = clean_reps if clean_reps else metrics["reps"]
+            fastest_rep = max(candidate_reps, key=lambda r: r["mean_v"])
+            n_outliers = len(metrics["reps"]) - len(clean_reps)
+
+            vbt_1rm, pct_used, vbt_affidabile, pct_raw = estimate_1rm_velocity(
                 exercise, fastest_rep["mean_v"], peso_kg
             )
             reps_1rm = estimate_1rm_from_reps(peso_kg, metrics["reps_count"])
 
-            # La stima da velocita' e' affidabile solo se il modello non e'
-            # stato "clampato" FUORI dal suo range valido E la serie e'
-            # abbastanza breve da poter essere un vero tentativo massimale.
+            # La stima da velocita' e' affidabile solo se TUTTE le condizioni
+            # seguenti valgono:
+            # - la serie e' abbastanza breve da poter essere un vero tentativo
+            #   massimale (serie_adatta_a_vbt);
+            # - la velocita' non e' troppo ALTA per il modello (vbt_affidabile,
+            #   pavimento al 30%);
+            # - la velocita' non e' troppo BASSA per il numero di ripetizioni
+            #   realmente svolte (coerente_con_reps): se il %1RM grezzo supera
+            #   di molto quello atteso per quel numero di rep, la lettura di
+            #   velocita' e' quasi certamente troppo bassa (fotogrammi quasi
+            #   fermi a inizio/fine rep, inquadratura non parallela al
+            #   bilanciere, ecc.), non un vero segnale di massimale.
             serie_adatta_a_vbt = metrics["reps_count"] <= REPS_MAX_FOR_RELIABLE_VBT
-            stima_affidabile = vbt_affidabile and serie_adatta_a_vbt
+            pct_atteso = expected_pct_1rm_for_reps(metrics["reps_count"])
+            coerente_con_reps = pct_raw <= pct_atteso + PCT_1RM_CEILING_TOLERANCE
+            stima_affidabile = vbt_affidabile and serie_adatta_a_vbt and coerente_con_reps
 
             micro_header(f"1RM stimato oggi <span>· {exercise}</span>")
+
+            if n_outliers > 0:
+                st.caption(
+                    f"⚙️ {n_outliers} ripetizione/i esclusa/e dal calcolo: velocità "
+                    f"anomala rispetto al resto della serie (probabile rumore di "
+                    f"tracciamento, spesso durante la fase eccentrica)."
+                )
 
             col_v, col_r = st.columns(2)
             col_v.metric(
                 "Da velocità (VBT)",
                 f"{vbt_1rm:.1f} kg",
-                help=f"Dalla ripetizione più veloce della serie ({fastest_rep['mean_v']:.2f} m/s), "
+                help=f"Dalla ripetizione più veloce e attendibile della serie "
+                     f"({fastest_rep['mean_v']:.2f} m/s, solo fase concentrica), "
                      f"corrispondente a circa il {pct_used:.0f}% dell'1RM secondo il profilo "
                      f"carico-velocità di {exercise}.",
             )
@@ -1091,22 +1233,32 @@ if process_clicked and selected_point is not None:
 
             if stima_affidabile:
                 st.caption(
-                    "Serie breve a velocità elevata: la stima **da velocità** è quella "
-                    "più affidabile in questo caso."
+                    "Serie breve a velocità elevata e coerente col numero di ripetizioni: "
+                    "la stima **da velocità** è quella più affidabile in questo caso."
                 )
             else:
-                motivo = (
-                    f"la serie ha {metrics['reps_count']} ripetizioni (il modello VBT è "
-                    f"pensato per serie di massimo {REPS_MAX_FOR_RELIABLE_VBT})"
-                    if not serie_adatta_a_vbt
-                    else "la ripetizione più veloce ha una velocità fuori dal range tipico del modello"
-                )
+                if not serie_adatta_a_vbt:
+                    motivo = (
+                        f"la serie ha {metrics['reps_count']} ripetizioni (il modello VBT è "
+                        f"pensato per serie di massimo {REPS_MAX_FOR_RELIABLE_VBT})"
+                    )
+                elif not coerente_con_reps:
+                    motivo = (
+                        f"la velocità rilevata sulla ripetizione più veloce è troppo bassa per "
+                        f"essere coerente con {metrics['reps_count']} ripetizioni svolte (implica "
+                        f"un {pct_raw:.0f}% del massimale, ma con quel numero di rep ci si aspetta "
+                        f"circa il {pct_atteso:.0f}%) — probabile inquadratura non perfettamente "
+                        f"parallela al bilanciere, o fotogrammi quasi fermi a inizio/fine ripetizione"
+                    )
+                else:
+                    motivo = "la ripetizione più veloce ha una velocità fuori dal range tipico del modello"
                 st.warning(
                     f"⚠️ La stima **da velocità** qui sopra non è affidabile: {motivo}. "
                     f"In questo caso conviene fare riferimento alla stima **da ripetizioni** "
                     f"({reps_1rm:.1f} kg). Per una stima da velocità precisa, esegui una serie "
                     f"breve (1-3 ripetizioni) alla massima velocità possibile con un carico "
-                    f"impegnativo."
+                    f"impegnativo, con il telefono ben perpendicolare al piano di movimento "
+                    f"del bilanciere."
                 )
             st.caption(
                 "Entrambe le stime sono indicative: non sostituiscono un test 1RM reale "
@@ -1114,16 +1266,21 @@ if process_clicked and selected_point is not None:
             )
 
             # --- Feedback su Velocity Loss ---
+            # Anche qui usiamo le rep "pulite" (non outlier) quando possibile:
+            # una prima o un'ultima rep anomala falserebbe il confronto tanto
+            # quanto falsava la stima 1RM.
+            vl_reps = clean_reps if len(clean_reps) >= 2 else metrics["reps"]
+
             micro_header("Consigli automatici")
-            if metrics["reps_count"] < 2:
+            if len(vl_reps) < 2:
                 st.info(
                     "Rilevata una sola ripetizione: la perdita di velocità si "
                     "calcola confrontando la prima e l'ultima ripetizione di "
                     "una serie con più ripetizioni."
                 )
             else:
-                v_first = metrics["reps"][0]["mean_v"]
-                v_last = metrics["reps"][-1]["mean_v"]
+                v_first = vl_reps[0]["mean_v"]
+                v_last = vl_reps[-1]["mean_v"]
                 if v_first > 0:
                     vl_pct = max(0.0, (v_first - v_last) / v_first * 100)
                     box_type, message = velocity_loss_feedback(vl_pct)
